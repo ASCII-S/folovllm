@@ -1,3 +1,6 @@
 [submodule "reference/vllm"]
 	path = reference/vllm
 	url = https://github.com/vllm-project/vllm.git
+[submodule "reference/nano-vllm"]
+	path = reference/nano-vllm
+	url = https://github.com/GeeeekExplorer/nano-vllm.git
