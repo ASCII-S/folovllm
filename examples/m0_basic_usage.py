@@ -17,13 +17,15 @@ from folovllm import (
     Request,
     SamplingParams,
     SchedulerConfig,
-    generate_request_id,
-    get_model_and_tokenizer,
-    get_gpu_memory_info,
-    is_cuda_available,
-    set_random_seed,
 )
-
+from folovllm.model_loader import get_model_and_tokenizer
+from folovllm.utils import (
+    is_cuda_available,
+    get_gpu_memory_info,
+    get_device,
+    set_random_seed,
+    generate_request_id,
+)
 
 def main():
     print("=" * 60)
@@ -48,7 +50,7 @@ def main():
     
     # 模型配置
     model_config = ModelConfig(
-        model="Qwen/Qwen2.5-0.6B",
+        model="Qwen/Qwen3-0.6B",
         dtype="float16" if device == "cuda" else "float32",
         trust_remote_code=True,
         max_model_len=2048,
