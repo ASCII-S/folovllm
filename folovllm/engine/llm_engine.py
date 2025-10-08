@@ -2,12 +2,13 @@
 
 import time
 import torch
-from typing import Iterator, Optional, Union
+from typing import Dict, Iterator, List, Optional, Union
 
-from folovllm.config import ModelConfig
+from folovllm.config import ModelConfig, SchedulerConfig
 from folovllm.model_loader import ModelLoader
 from folovllm.executor import GPUExecutor
 from folovllm.engine.processor import InputProcessor
+from folovllm.engine.core import EngineCore
 from folovllm.sample import Sampler
 from folovllm.sampling_params import SamplingParams
 from folovllm.request import Request, SequenceStatus
@@ -17,27 +18,28 @@ from folovllm.outputs import RequestOutput, CompletionOutput
 class LLMEngine:
     """Main LLM engine for text generation.
     
-    This is the primary user-facing interface for M1.
-    Provides synchronous generation for single requests.
+    This is the primary user-facing interface.
     
-    M2 will add:
-    - Asynchronous generation
-    - Continuous batching
-    - Multi-request handling
+    M1: Single request, synchronous generation
+    M2: Batch requests, continuous batching
+    M3+: PagedAttention, preemption, swapping
     """
     
     def __init__(
         self,
         model_config: ModelConfig,
+        scheduler_config: Optional[SchedulerConfig] = None,
         device: Optional[str] = None,
     ):
         """Initialize LLM engine.
         
         Args:
             model_config: Model configuration
+            scheduler_config: Scheduler configuration (M2+)
             device: Device to run on (e.g., 'cuda:0')
         """
         self.model_config = model_config
+        self.scheduler_config = scheduler_config or SchedulerConfig()
         
         # Load tokenizer
         print("Loading tokenizer...")
@@ -51,6 +53,18 @@ class LLMEngine:
         # Create processor and sampler
         self.processor = InputProcessor(self.tokenizer)
         self.sampler = Sampler()
+        
+        # M2: Create EngineCore for continuous batching
+        self.engine_core = EngineCore(
+            model_config=model_config,
+            scheduler_config=self.scheduler_config,
+            executor=self.executor,
+            sampler=self.sampler,
+            processor=self.processor,
+        )
+        
+        # Request counter for generating unique IDs
+        self._request_counter = 0
         
         print("LLM Engine initialized successfully!")
     
@@ -231,4 +245,93 @@ class LLMEngine:
         )
         
         return output
+    
+    def generate_batch(
+        self,
+        prompts: Union[List[str], List[Request]],
+        sampling_params: Optional[Union[SamplingParams, List[SamplingParams]]] = None,
+    ) -> Dict[str, RequestOutput]:
+        """Generate text for multiple prompts using continuous batching (M2).
+        
+        This method processes multiple requests concurrently using
+        continuous batching for improved throughput.
+        
+        Args:
+            prompts: List of prompt strings or Request objects
+            sampling_params: Sampling parameters (single or per-prompt list)
+            
+        Returns:
+            Dict mapping request_id -> RequestOutput
+        """
+        # Convert prompts to requests
+        requests = []
+        if isinstance(prompts[0], str):
+            # String prompts - need to create Request objects
+            if sampling_params is None:
+                sampling_params = SamplingParams()
+            
+            # Handle single or multiple sampling params
+            if isinstance(sampling_params, SamplingParams):
+                sampling_params_list = [sampling_params] * len(prompts)
+            else:
+                sampling_params_list = sampling_params
+                
+            for i, prompt in enumerate(prompts):
+                request = self.processor.process_request(
+                    prompt,
+                    sampling_params_list[i],
+                    request_id=f"req-{self._request_counter}",
+                )
+                self._request_counter += 1
+                requests.append(request)
+        else:
+            # Already Request objects
+            requests = prompts
+        
+        # Add all requests to the engine
+        for request in requests:
+            self.engine_core.add_request(request)
+        
+        # Track outputs
+        all_outputs: Dict[str, RequestOutput] = {}
+        finished_request_ids = set()
+        target_request_ids = {req.request_id for req in requests}
+        
+        # Run generation loop until all requests finish
+        start_time = time.time()
+        iteration = 0
+        
+        while len(finished_request_ids) < len(requests):
+            iteration += 1
+            
+            # Execute one step
+            step_outputs = self.engine_core.step()
+            
+            # Update outputs
+            for req_id, output in step_outputs.items():
+                if req_id in target_request_ids:
+                    all_outputs[req_id] = output
+                    if output.finished:
+                        finished_request_ids.add(req_id)
+            
+            # Safety check: prevent infinite loops
+            if iteration > 10000:
+                print(f"Warning: Generation exceeded 10000 iterations")
+                break
+        
+        # Add timing metrics
+        total_time = time.time() - start_time
+        total_tokens = sum(
+            len(output.outputs[0].token_ids)
+            for output in all_outputs.values()
+        )
+        
+        print(f"\nBatch generation complete:")
+        print(f"  Requests: {len(requests)}")
+        print(f"  Total time: {total_time:.2f}s")
+        print(f"  Total tokens: {total_tokens}")
+        print(f"  Throughput: {total_tokens/total_time:.2f} tokens/s")
+        print(f"  Iterations: {iteration}")
+        
+        return all_outputs
 

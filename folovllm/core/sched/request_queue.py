@@ -1,118 +1,168 @@
-"""Request queue implementations."""
+"""Request queue implementations (aligned with vLLM v1).
 
+This module provides queue implementations for different scheduling policies.
+For M2, we implement FCFS (First-Come-First-Served) policy.
+M3+ will add priority-based scheduling.
+"""
+
+from abc import ABC, abstractmethod
 from collections import deque
-from typing import Iterator, List
+from typing import Iterable, Iterator
+from enum import Enum
 
 from folovllm.request import Request
 
 
-class RequestQueue:
-    """A FCFS (First-Come-First-Served) request queue.
+class SchedulingPolicy(Enum):
+    """Enum for scheduling policies."""
+    FCFS = "fcfs"
+    PRIORITY = "priority"  # Reserved for M3+
+
+
+class RequestQueue(ABC):
+    """Abstract base class for request queues.
     
-    Uses deque for efficient O(1) operations at both ends.
-    Aligned with vLLM v1's FCFSRequestQueue.
-    
-    For M2, we use simple FCFS scheduling.
-    M3+ may add priority-based scheduling.
+    Defines the interface that all queue implementations must follow.
+    This abstraction allows for different scheduling policies (FCFS, priority, etc.).
     """
     
-    def __init__(self):
-        """Initialize an empty request queue."""
-        self._queue: deque[Request] = deque()
+    @abstractmethod
+    def add_request(self, request: Request) -> None:
+        """Add a request to the queue according to the policy."""
+        pass
+    
+    @abstractmethod
+    def pop_request(self) -> Request:
+        """Pop a request from the queue according to the policy."""
+        pass
+    
+    @abstractmethod
+    def peek_request(self) -> Request:
+        """Peek at the request at the front of the queue without removing it."""
+        pass
+    
+    @abstractmethod
+    def prepend_request(self, request: Request) -> None:
+        """Prepend a request to the front of the queue.
+        
+        Used for preempted requests that need to resume quickly.
+        """
+        pass
+    
+    @abstractmethod
+    def prepend_requests(self, requests: "RequestQueue") -> None:
+        """Prepend all requests from another queue to the front of this queue."""
+        pass
+    
+    @abstractmethod
+    def remove_request(self, request: Request) -> None:
+        """Remove a specific request from the queue."""
+        pass
+    
+    @abstractmethod
+    def remove_requests(self, requests: Iterable[Request]) -> None:
+        """Remove multiple specific requests from the queue."""
+        pass
+    
+    @abstractmethod
+    def __bool__(self) -> bool:
+        """Check if queue has any requests."""
+        pass
+    
+    @abstractmethod
+    def __len__(self) -> int:
+        """Get number of requests in queue."""
+        pass
+    
+    @abstractmethod
+    def __iter__(self) -> Iterator[Request]:
+        """Iterate over the queue according to the policy."""
+        pass
+    
+    @abstractmethod
+    def __reversed__(self) -> Iterator[Request]:
+        """Iterate over the queue in reverse order."""
+        pass
+
+
+class FCFSRequestQueue(deque, RequestQueue):
+    """First-Come-First-Served queue using deque.
+    
+    This is the simplest scheduling policy where requests are processed
+    in the order they arrive. It provides O(1) operations for adding
+    and removing from both ends.
+    
+    For M2: This is the primary queue implementation.
+    For M3+: Priority queue will be added for more sophisticated scheduling.
+    """
+    
+    def __bool__(self) -> bool:
+        """Check if queue has any requests."""
+        return len(self) > 0
     
     def add_request(self, request: Request) -> None:
-        """Add a request to the back of the queue.
-        
-        Args:
-            request: The request to add.
-        """
-        self._queue.append(request)
+        """Add a request to the end of the queue."""
+        self.append(request)
     
     def pop_request(self) -> Request:
-        """Remove and return the request at the front of the queue.
-        
-        Returns:
-            The request at the front.
-            
-        Raises:
-            IndexError: If the queue is empty.
-        """
-        return self._queue.popleft()
+        """Pop a request from the front of the queue."""
+        return self.popleft()
     
     def peek_request(self) -> Request:
-        """Return the request at the front without removing it.
-        
-        Returns:
-            The request at the front.
-            
-        Raises:
-            IndexError: If the queue is empty.
-        """
-        if not self._queue:
+        """Peek at the next request without removing it."""
+        if not self:
             raise IndexError("peek from an empty queue")
-        return self._queue[0]
+        return self[0]
     
     def prepend_request(self, request: Request) -> None:
         """Add a request to the front of the queue.
         
-        Used for request preemption.
-        
-        Args:
-            request: The request to prepend.
+        Used when a request is preempted and needs to resume quickly.
         """
-        self._queue.appendleft(request)
+        self.appendleft(request)
+    
+    def prepend_requests(self, requests: RequestQueue) -> None:
+        """Prepend all requests from another queue.
+        
+        Requests are added in reverse order to maintain their relative ordering.
+        """
+        for request in reversed(requests):
+            self.prepend_request(request)
     
     def remove_request(self, request: Request) -> None:
-        """Remove a specific request from the queue.
+        """Remove a specific request from the queue."""
+        try:
+            self.remove(request)
+        except ValueError:
+            # Request not in queue, ignore
+            pass
+    
+    def remove_requests(self, requests: Iterable[Request]) -> None:
+        """Remove multiple specific requests from the queue."""
+        for request in requests:
+            self.remove_request(request)
+
+
+def create_request_queue(policy: SchedulingPolicy) -> RequestQueue:
+    """Factory function to create a request queue based on policy.
+    
+    Args:
+        policy: The scheduling policy to use.
         
-        Args:
-            request: The request to remove.
-            
-        Raises:
-            ValueError: If the request is not in the queue.
-        """
-        self._queue.remove(request)
-    
-    def remove_request_by_id(self, request_id: str) -> bool:
-        """Remove a request by its ID.
+    Returns:
+        A RequestQueue instance implementing the specified policy.
         
-        Args:
-            request_id: The ID of the request to remove.
-            
-        Returns:
-            True if the request was found and removed, False otherwise.
-        """
-        for req in self._queue:
-            if req.request_id == request_id:
-                self._queue.remove(req)
-                return True
-        return False
-    
-    def __len__(self) -> int:
-        """Return the number of requests in the queue."""
-        return len(self._queue)
-    
-    def __bool__(self) -> bool:
-        """Return True if the queue is not empty."""
-        return len(self._queue) > 0
-    
-    def __iter__(self) -> Iterator[Request]:
-        """Iterate over requests in FCFS order."""
-        return iter(self._queue)
-    
-    def __contains__(self, request: Request) -> bool:
-        """Check if a request is in the queue."""
-        return request in self._queue
-    
-    def clear(self) -> None:
-        """Remove all requests from the queue."""
-        self._queue.clear()
-    
-    def get_all_requests(self) -> List[Request]:
-        """Get a list of all requests in the queue.
-        
-        Returns:
-            List of all requests in FCFS order.
-        """
-        return list(self._queue)
+    Raises:
+        ValueError: If the policy is not supported.
+    """
+    if policy == SchedulingPolicy.FCFS:
+        return FCFSRequestQueue()
+    elif policy == SchedulingPolicy.PRIORITY:
+        # Reserved for M3+
+        raise NotImplementedError(
+            "Priority scheduling is not yet implemented. "
+            "It will be added in M3+."
+        )
+    else:
+        raise ValueError(f"Unknown scheduling policy: {policy}")
 

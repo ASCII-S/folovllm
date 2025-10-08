@@ -292,6 +292,7 @@ class Qwen3ForCausalLM(nn.Module):
         Returns:
             Logits [batch_size, seq_len, vocab_size]
         """
+        print("Qwen3ForCausalLM.compute_logits")
         return self.lm_head(hidden_states)
     
     @torch.no_grad()

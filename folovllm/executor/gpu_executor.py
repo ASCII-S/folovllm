@@ -1,10 +1,11 @@
 """GPU executor for managing GPU workers."""
 
 import torch
-from typing import Optional
+from typing import Dict, Optional
 
 from folovllm.config import ModelConfig
 from folovllm.worker import GPUWorker
+from folovllm.worker.input_batch import InputBatch
 
 
 class GPUExecutor:
@@ -67,4 +68,26 @@ class GPUExecutor:
     def clear_kv_caches(self):
         """Clear KV caches in all workers."""
         self.worker.clear_kv_caches()
+    
+    def execute_model_batch(
+        self,
+        input_batch: InputBatch,
+    ) -> Dict[str, torch.Tensor]:
+        """Execute model for a batch of requests (M2).
+        
+        Args:
+            input_batch: Batch of inputs
+            
+        Returns:
+            Dict mapping req_id -> logits for next token
+        """
+        return self.worker.execute_model_batch(input_batch)
+    
+    def free_request_cache(self, req_id: str):
+        """Free KV cache for a finished request.
+        
+        Args:
+            req_id: Request ID to free cache for
+        """
+        self.worker.free_request_cache(req_id)
 

@@ -1,263 +1,388 @@
-"""Main scheduler implementation for continuous batching."""
+"""Scheduler implementation (aligned with vLLM v1).
 
-from typing import List, Optional
+The scheduler manages request queues and decides which requests
+to process in each iteration (continuous batching).
+"""
 
-from folovllm.config import SchedulerConfig
-from folovllm.core.sched.interface import SchedulerInterface
-from folovllm.core.sched.output import SchedulerOutput
-from folovllm.core.sched.request_queue import RequestQueue
+import time
+from typing import Dict, Iterable, List, Optional, Set, Union
+
+from folovllm.config import ModelConfig, SchedulerConfig
 from folovllm.request import Request, RequestStatus, SequenceStatus
+from folovllm.outputs import RequestOutput, CompletionOutput
+from folovllm.core.sched.interface import SchedulerInterface
+from folovllm.core.sched.request_queue import (
+    RequestQueue,
+    SchedulingPolicy,
+    create_request_queue,
+)
+from folovllm.core.sched.output import (
+    NewRequestData,
+    CachedRequestData,
+    SchedulerOutput,
+)
 
 
 class Scheduler(SchedulerInterface):
-    """Scheduler for continuous batching.
+    """Continuous batching scheduler for M2.
     
-    Manages request lifecycle and decides which requests to process at each iteration.
-    Implements iteration-level scheduling with separate prefill and decode batches.
+    Implements iteration-level scheduling where:
+    - New requests get scheduled for prefill (process full prompt)
+    - Running requests get scheduled for decode (process 1 token)
+    - Finished requests are tracked and resources freed
     
-    For M2:
-    - FCFS scheduling policy
-    - Separate prefill and decode batches (no mixing)
-    - Basic preemption support
-    - No paged attention yet (continuous KV cache)
-    
-    M3+ will add:
-    - Paged attention and block management
-    - More sophisticated preemption
-    - Prefix caching
+    For M2: Simple scheduling without preemption or swapping
+    For M3+: Will add KV cache block management, preemption, swapping
     """
     
-    def __init__(self, scheduler_config: SchedulerConfig):
+    def __init__(
+        self,
+        model_config: ModelConfig,
+        scheduler_config: SchedulerConfig,
+    ):
         """Initialize the scheduler.
         
         Args:
-            scheduler_config: Scheduler configuration.
+            model_config: Model configuration
+            scheduler_config: Scheduler configuration
         """
+        self.model_config = model_config
         self.scheduler_config = scheduler_config
         
         # Scheduling constraints
         self.max_num_seqs = scheduler_config.max_num_seqs
-        self.max_num_batched_tokens = (
-            scheduler_config.max_num_batched_tokens or 2048
-        )
+        self.max_num_batched_tokens = scheduler_config.max_num_batched_tokens
         self.max_model_len = scheduler_config.max_model_len or 2048
         
-        # Request queues (FCFS for M2)
-        self.waiting: RequestQueue = RequestQueue()  # Waiting to be scheduled
-        self.running: RequestQueue = RequestQueue()  # Currently being processed
-        self.finished: List[Request] = []            # Finished in last iteration
+        # Request storage: req_id -> Request
+        self.requests: Dict[str, Request] = {}
         
-        # Track requests by ID for quick lookup
-        self._request_map: dict[str, Request] = {}
+        # Request queues
+        self.policy = SchedulingPolicy.FCFS  # M2: Only FCFS
+        self.waiting: RequestQueue = create_request_queue(self.policy)
+        self.running: List[Request] = []  # Requests currently being processed
+        
+        # Finished request tracking
+        # These are requests that finished in the previous step and need
+        # to be communicated to workers for resource cleanup
+        self.finished_req_ids: Set[str] = set()
+        
+        # M3+ will add:
+        # - KV cache manager
+        # - Block allocator
+        # - Swapping manager
     
     def add_request(self, request: Request) -> None:
         """Add a new request to the waiting queue.
         
         Args:
-            request: The request to add.
+            request: The request to add
         """
+        if request.request_id in self.requests:
+            # Request already exists, ignore
+            return
+        
         request.status = RequestStatus.WAITING
-        # Mark all sequences as waiting
         for seq in request.get_seqs():
             seq.status = SequenceStatus.WAITING
         
+        self.requests[request.request_id] = request
         self.waiting.add_request(request)
-        self._request_map[request.request_id] = request
-    
-    def abort_request(self, request_id: str) -> None:
-        """Abort a request by its ID.
-        
-        Args:
-            request_id: The ID of the request to abort.
-        """
-        # Try to find and remove from waiting queue
-        if self.waiting.remove_request_by_id(request_id):
-            if request_id in self._request_map:
-                req = self._request_map.pop(request_id)
-                req.status = RequestStatus.FINISHED_ABORTED
-            return
-        
-        # Try to find in running queue
-        request = self._request_map.get(request_id)
-        if request and request in self.running:
-            self.running.remove_request(request)
-            request.status = RequestStatus.FINISHED_ABORTED
-            for seq in request.get_seqs():
-                seq.status = SequenceStatus.FINISHED_ABORTED
-            self._request_map.pop(request_id)
     
     def schedule(self) -> SchedulerOutput:
         """Schedule requests for the next iteration.
         
-        M2 scheduling logic:
-        1. First, try to schedule waiting requests (prefill)
-        2. If no waiting requests, schedule running requests (decode)
-        3. Keep prefill and decode separate (no mixing)
+        Scheduling logic for M2:
+        1. Try to move waiting requests to running (up to max_num_seqs)
+        2. For new requests: schedule full prompt (prefill)
+        3. For running requests: schedule 1 token (decode)
+        4. Ensure total tokens <= max_num_batched_tokens
         
         Returns:
-            SchedulerOutput with scheduled requests.
+            SchedulerOutput with scheduled requests
         """
-        # Clear finished requests from last iteration
-        self.finished.clear()
+        scheduled_new_reqs: List[NewRequestData] = []
+        scheduled_cached_req_ids: List[str] = []
+        scheduled_cached_tokens: List[List[int]] = []
+        scheduled_cached_computed: List[int] = []
+        scheduled_cached_output: List[int] = []
         
-        # Try prefill first (waiting requests)
-        scheduler_output = self._schedule_prefill()
-        if not scheduler_output.is_empty():
-            return scheduler_output
+        num_scheduled_tokens: Dict[str, int] = {}
+        total_tokens = 0
         
-        # If no prefill, do decode (running requests)
-        return self._schedule_decode()
-    
-    def _schedule_prefill(self) -> SchedulerOutput:
-        """Schedule waiting requests for prefill.
-        
-        Prefill processes the entire prompt in one forward pass.
-        
-        Returns:
-            SchedulerOutput for prefill batch.
-        """
-        scheduled_requests = []
-        num_seqs = 0
-        num_tokens = 0
-        
-        # Try to schedule as many waiting requests as possible
-        while self.waiting:
-            if num_seqs >= self.max_num_seqs:
-                break
-            
+        # Step 1: Try to admit new requests from waiting queue
+        while self.waiting and len(self.running) < self.max_num_seqs:
             request = self.waiting.peek_request()
             
-            # Get the first sequence (M2 only supports best_of=1)
-            seqs = request.get_seqs()
-            if not seqs:
-                # No sequences, skip this request
-                self.waiting.pop_request()
-                continue
-            
-            seq = seqs[0]
+            # Get the first (and for M2, only) sequence
+            seq = request.get_seqs()[0]
             prompt_len = seq.get_prompt_len()
             
-            # Check if we can fit this request
-            if num_tokens + prompt_len > self.max_num_batched_tokens:
-                # Cannot fit, stop scheduling
+            # Check if we have budget for this request
+            if total_tokens + prompt_len > self.max_num_batched_tokens:
+                # Cannot fit this request, stop admitting
                 break
             
-            # Check max_model_len constraint
-            if prompt_len > self.max_model_len:
-                # Prompt too long, skip and mark as finished
-                self.waiting.pop_request()
-                request.status = RequestStatus.FINISHED_LENGTH_CAPPED
-                for s in seqs:
-                    s.status = SequenceStatus.FINISHED_LENGTH_CAPPED
-                continue
-            
-            # Can schedule this request
-            self.waiting.pop_request()
+            # Admit the request
+            request = self.waiting.pop_request()
             request.status = RequestStatus.RUNNING
-            for s in seqs:
-                s.status = SequenceStatus.RUNNING
+            seq.status = SequenceStatus.RUNNING
+            self.running.append(request)
             
-            self.running.add_request(request)
-            scheduled_requests.append(request)
-            num_seqs += len(seqs)
-            num_tokens += prompt_len
+            # Schedule full prompt for prefill
+            new_req_data = NewRequestData(
+                req_id=request.request_id,
+                prompt_token_ids=seq.data.prompt_token_ids,
+                sampling_params=request.sampling_params,
+                num_computed_tokens=0,
+                block_ids=[],  # M3+: Will allocate KV cache blocks
+            )
+            scheduled_new_reqs.append(new_req_data)
+            num_scheduled_tokens[request.request_id] = prompt_len
+            total_tokens += prompt_len
         
-        return SchedulerOutput(
-            scheduled_requests=scheduled_requests,
-            num_scheduled_seqs=num_seqs,
-            num_scheduled_tokens=num_tokens,
-            is_prefill=True,
-            finished_request_ids=[],
-        )
-    
-    def _schedule_decode(self) -> SchedulerOutput:
-        """Schedule running requests for decode.
-        
-        Decode generates one token at a time for each sequence.
-        
-        Returns:
-            SchedulerOutput for decode batch.
-        """
-        scheduled_requests = []
-        num_seqs = 0
-        
-        # Schedule running requests
-        # For decode, each sequence generates 1 token
-        for request in list(self.running):
-            seqs = request.get_seqs(status=SequenceStatus.RUNNING)
-            if not seqs:
-                # No running sequences, skip
+        # Step 2: Schedule decode for running requests
+        for request in self.running:
+            # Skip if this request was just added (already scheduled above)
+            if request.request_id in [r.req_id for r in scheduled_new_reqs]:
                 continue
             
-            if num_seqs + len(seqs) > self.max_num_seqs:
-                # Cannot fit more sequences
-                break
+            seq = request.get_seqs()[0]
             
-            scheduled_requests.append(request)
-            num_seqs += len(seqs)
+            # Check if we have budget for 1 more token
+            if total_tokens + 1 > self.max_num_batched_tokens:
+                # Out of budget, cannot schedule this request
+                # M3+: This is where we'd implement preemption
+                continue
+            
+            # Schedule 1 token for decode
+            # Get the last generated token (or last prompt token if no output yet)
+            if seq.get_output_len() > 0:
+                last_token = seq.data.output_token_ids[-1]
+            else:
+                # First decode step after prefill
+                last_token = seq.data.prompt_token_ids[-1]
+            
+            scheduled_cached_req_ids.append(request.request_id)
+            scheduled_cached_tokens.append([last_token])
+            scheduled_cached_computed.append(seq.get_len())
+            scheduled_cached_output.append(seq.get_output_len())
+            
+            num_scheduled_tokens[request.request_id] = 1
+            total_tokens += 1
         
-        # For decode, we process 1 token per sequence
-        num_tokens = num_seqs
-        
-        return SchedulerOutput(
-            scheduled_requests=scheduled_requests,
-            num_scheduled_seqs=num_seqs,
-            num_scheduled_tokens=num_tokens,
-            is_prefill=False,
-            finished_request_ids=[req.request_id for req in self.finished],
+        # Build CachedRequestData
+        cached_req_data = CachedRequestData(
+            req_ids=scheduled_cached_req_ids,
+            new_token_ids=scheduled_cached_tokens,
+            num_computed_tokens=scheduled_cached_computed,
+            num_output_tokens=scheduled_cached_output,
+            new_block_ids=[None] * len(scheduled_cached_req_ids),  # M3+
         )
+        
+        # Build SchedulerOutput
+        scheduler_output = SchedulerOutput(
+            scheduled_new_reqs=scheduled_new_reqs,
+            scheduled_cached_reqs=cached_req_data,
+            num_scheduled_tokens=num_scheduled_tokens,
+            total_num_scheduled_tokens=total_tokens,
+            finished_req_ids=self.finished_req_ids.copy(),
+        )
+        
+        # Clear finished_req_ids (they've been communicated)
+        self.finished_req_ids.clear()
+        
+        return scheduler_output
     
-    def finish_request(self, request: Request, status: RequestStatus) -> None:
-        """Mark a request as finished and remove it from running queue.
+    def update_from_output(
+        self,
+        scheduler_output: SchedulerOutput,
+        model_output: Dict[str, int],  # req_id -> next_token_id
+    ) -> Dict[str, RequestOutput]:
+        """Update scheduler state based on model output.
         
         Args:
-            request: The request to finish.
-            status: The finished status.
-        """
-        request.status = status
-        
-        # Update sequence status
-        seq_status_map = {
-            RequestStatus.FINISHED_STOPPED: SequenceStatus.FINISHED_STOPPED,
-            RequestStatus.FINISHED_LENGTH_CAPPED: SequenceStatus.FINISHED_LENGTH_CAPPED,
-            RequestStatus.FINISHED_ABORTED: SequenceStatus.FINISHED_ABORTED,
-        }
-        seq_status = seq_status_map.get(status, SequenceStatus.FINISHED_STOPPED)
-        
-        for seq in request.get_seqs():
-            seq.status = seq_status
-        
-        # Remove from running queue
-        if request in self.running:
-            self.running.remove_request(request)
-        
-        # Add to finished list
-        self.finished.append(request)
-        
-        # Remove from request map
-        self._request_map.pop(request.request_id, None)
-    
-    def has_unfinished_requests(self) -> bool:
-        """Check if there are unfinished requests.
-        
+            scheduler_output: The output from schedule()
+            model_output: Dict mapping req_id to generated token_id
+            
         Returns:
-            True if there are requests in waiting or running queues.
+            Dict of req_id -> RequestOutput for updated/finished requests
         """
-        return len(self.waiting) > 0 or len(self.running) > 0
+        outputs: Dict[str, RequestOutput] = {}
+        finished_requests: List[Request] = []
+        
+        # Update all scheduled requests with new tokens
+        all_req_ids = (
+            [r.req_id for r in scheduler_output.scheduled_new_reqs] +
+            scheduler_output.scheduled_cached_reqs.req_ids
+        )
+        
+        for req_id in all_req_ids:
+            if req_id not in model_output:
+                continue
+            
+            request = self.requests[req_id]
+            seq = request.get_seqs()[0]
+            next_token_id = model_output[req_id]
+            
+            # Add the new token
+            seq.add_token_id(next_token_id)
+            
+            # Check stop conditions
+            should_stop, finish_reason = self._check_stop_conditions(request, seq)
+            
+            if should_stop:
+                # Mark as finished
+                if finish_reason == "stop":
+                    seq.status = SequenceStatus.FINISHED_STOPPED
+                    request.status = RequestStatus.FINISHED_STOPPED
+                elif finish_reason == "length":
+                    seq.status = SequenceStatus.FINISHED_LENGTH_CAPPED
+                    request.status = RequestStatus.FINISHED_LENGTH_CAPPED
+                
+                finished_requests.append(request)
+            
+            # Build output for this request (even if not finished, for streaming)
+            output = self._build_request_output(request)
+            outputs[req_id] = output
+        
+        # Remove finished requests from running queue
+        for request in finished_requests:
+            self.running.remove(request)
+            self.finished_req_ids.add(request.request_id)
+            # M3+: Free KV cache blocks here
+        
+        return outputs
+    
+    def _check_stop_conditions(
+        self,
+        request: Request,
+        seq,
+    ) -> tuple[bool, Optional[str]]:
+        """Check if a sequence should stop generation.
+        
+        Args:
+            request: The request
+            seq: The sequence to check
+            
+        Returns:
+            Tuple of (should_stop, finish_reason)
+        """
+        sampling_params = request.sampling_params
+        
+        # Check max tokens
+        if sampling_params.max_tokens is not None:
+            if seq.get_output_len() >= sampling_params.max_tokens:
+                return True, "length"
+        
+        # Check EOS token (if not ignored)
+        if not sampling_params.ignore_eos:
+            # We'll check EOS in the actual token checking
+            # For now, this is a placeholder
+            pass
+        
+        # Check stop token IDs
+        if sampling_params.stop_token_ids:
+            if seq.get_last_token_id() in sampling_params.stop_token_ids:
+                return True, "stop"
+        
+        # M2: We don't decode tokens here, so can't check stop strings
+        # The engine will handle stop string checking after decoding
+        
+        return False, None
+    
+    def _build_request_output(self, request: Request) -> RequestOutput:
+        """Build RequestOutput for a request.
+        
+        Args:
+            request: The request
+            
+        Returns:
+            RequestOutput
+        """
+        # Build completion outputs for all sequences
+        completion_outputs = []
+        for idx, seq in enumerate(request.get_seqs()):
+            finish_reason = None
+            if seq.status == SequenceStatus.FINISHED_STOPPED:
+                finish_reason = "stop"
+            elif seq.status == SequenceStatus.FINISHED_LENGTH_CAPPED:
+                finish_reason = "length"
+            
+            completion_output = CompletionOutput(
+                index=idx,
+                text="",  # Will be decoded by engine
+                token_ids=seq.data.output_token_ids.copy(),
+                cumulative_logprob=None,
+                logprobs=None,
+                finish_reason=finish_reason,
+            )
+            completion_outputs.append(completion_output)
+        
+        finished = request.is_finished()
+        
+        return RequestOutput(
+            request_id=request.request_id,
+            prompt=request.prompt,
+            prompt_token_ids=request.prompt_token_ids,
+            outputs=completion_outputs,
+            finished=finished,
+        )
+    
+    def finish_requests(
+        self,
+        request_ids: Union[str, Iterable[str]],
+        finished_status: RequestStatus,
+    ) -> None:
+        """Mark requests as finished.
+        
+        Args:
+            request_ids: Single ID or iterable of IDs
+            finished_status: The status to assign
+        """
+        if isinstance(request_ids, str):
+            request_ids = [request_ids]
+        
+        for req_id in request_ids:
+            if req_id not in self.requests:
+                continue
+            
+            request = self.requests[req_id]
+            request.status = finished_status
+            
+            # Update sequence status
+            seq_status_map = {
+                RequestStatus.FINISHED_STOPPED: SequenceStatus.FINISHED_STOPPED,
+                RequestStatus.FINISHED_LENGTH_CAPPED: SequenceStatus.FINISHED_LENGTH_CAPPED,
+                RequestStatus.FINISHED_ABORTED: SequenceStatus.FINISHED_ABORTED,
+            }
+            seq_status = seq_status_map.get(
+                finished_status,
+                SequenceStatus.FINISHED_ABORTED
+            )
+            for seq in request.get_seqs():
+                seq.status = seq_status
+            
+            # Remove from queues
+            self.waiting.remove_request(request)
+            if request in self.running:
+                self.running.remove(request)
+            
+            self.finished_req_ids.add(req_id)
     
     def get_num_unfinished_requests(self) -> int:
-        """Get the number of unfinished requests.
-        
-        Returns:
-            Total number of requests in waiting and running queues.
-        """
+        """Get number of unfinished requests."""
         return len(self.waiting) + len(self.running)
     
-    def get_num_waiting_requests(self) -> int:
-        """Get the number of waiting requests."""
-        return len(self.waiting)
+    def has_finished_requests(self) -> bool:
+        """Check if there are finished requests pending notification."""
+        return len(self.finished_req_ids) > 0
     
-    def get_num_running_requests(self) -> int:
-        """Get the number of running requests."""
-        return len(self.running)
+    def get_request_counts(self) -> tuple[int, int]:
+        """Get request counts.
+        
+        Returns:
+            (num_running, num_waiting)
+        """
+        return len(self.running), len(self.waiting)
 

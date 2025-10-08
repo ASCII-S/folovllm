@@ -58,14 +58,22 @@ python examples/m0_basic_usage.py
 
 # M1 推理示例
 python examples/m1_inference.py \
-    --model Qwen/Qwen3-0.6B \
+    --model Qwen/Qwen2.5-0.5B \
     --prompt "What is the capital of France?" \
     --max-tokens 50
+
+# M2 批量推理示例（连续批处理）
+python examples/m2_inference.py \
+    --model Qwen/Qwen2.5-0.5B \
+    --num-prompts 5 \
+    --max-tokens 64 \
+    --compare-sequential
 
 # 运行测试
 pytest tests/unit/test_m0_*.py -v
 pytest tests/unit/test_m1_*.py -v
-pytest tests/integration/test_m1_e2e.py -v
+pytest tests/unit/test_m2_*.py -v
+pytest tests/integration/test_m2_e2e.py -v
 ```
 
 ### 3. 基础使用
@@ -80,10 +88,10 @@ config = ModelConfig(
     trust_remote_code=True
 )
 
-# 初始化引擎（M1 完成）
+# 初始化引擎
 engine = LLMEngine(config, device="cuda")
 
-# 生成文本
+# M1: 单请求生成
 sampling_params = SamplingParams(
     temperature=0.7,
     top_k=50,
@@ -91,9 +99,26 @@ sampling_params = SamplingParams(
     max_tokens=100
 )
 output = engine.generate("你好，请介绍一下自己", sampling_params)
-
 print(output.outputs[0].text)
-print(f"Throughput: {output.metrics['throughput']:.2f} tokens/s")
+
+# M2: 批量生成（连续批处理）
+from folovllm import SchedulerConfig
+
+scheduler_config = SchedulerConfig(
+    max_num_seqs=256,
+    max_num_batched_tokens=2048
+)
+engine = LLMEngine(config, scheduler_config=scheduler_config, device="cuda")
+
+prompts = [
+    "What is the capital of France?",
+    "Explain quantum computing.",
+    "Write a haiku about AI.",
+]
+outputs = engine.generate_batch(prompts, sampling_params)
+
+for req_id, output in outputs.items():
+    print(f"{output.prompt} -> {output.outputs[0].text}")
 ```
 
 ## 📚 开发路线
@@ -104,7 +129,7 @@ print(f"Throughput: {output.metrics['throughput']:.2f} tokens/s")
 | ------ | --------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **M0** | 项目初始化      | ✅ 已完成 | [开发日志](docs/dev/milestone_0.md)                                                                                                                                    |
 | **M1** | 基础离线推理    | ✅ 已完成 | [📖 总览](docs/milestone_1_index.md) · [学习笔记](docs/learn/milestone_1.md) · [口述展示](docs/presentation/milestone_1.md) · [面试指南](docs/interview/milestone_1.md) |
-| **M2** | 连续批处理      | ⏳ 待开始 | [学习笔记](docs/learn/02_continuous_batching.md)                                                                                                                       |
+| **M2** | 连续批处理      | ✅ 已完成 | [开发日志](docs/dev/milestone_2.md)                                                                                                                                    |
 | **M3** | Paged KV Cache  | ⏳ 待开始 | [学习笔记](docs/learn/03_paged_kv_cache.md)                                                                                                                            |
 | **M4** | Flash Attention | ⏳ 待开始 | [学习笔记](docs/learn/04_flash_attention.md)                                                                                                                           |
 | **M5** | Chunked Prefill | ⏳ 待开始 | [学习笔记](docs/learn/05_chunked_prefill.md)                                                                                                                           |

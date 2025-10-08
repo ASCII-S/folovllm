@@ -1,7 +1,9 @@
 ---
 alwaysApply: true
 ---
-在这个项目中，我需要模仿vllm的源码，制作一个轻量级的推理框架-folovllm，以推理中`Qwen/Qwen3-0.6B`模型为例。
+在这个项目中，我需要模仿vllm的源码，制作一个轻量级的推理框架-folovllm。
+
+使用`Qwen/Qwen3-0.6B`模型。
 
 参考vllm源码：你可以查看本地源码`reference/vllm/vllm/v1`；可以参考也可以网页搜索vllm的源码，并参考相关内容。
 

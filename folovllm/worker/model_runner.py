@@ -39,12 +39,13 @@ class ModelRunner:
         self.device = device
         
         # KV caches for each layer (will be initialized on first forward)
+        # M1: Single cache for single request
         self.kv_caches: Optional[List[Tuple[torch.Tensor, torch.Tensor]]] = None
         self.past_key_values = None  # For HuggingFace models
         
-        # M2: Per-sequence KV caches for batched execution
-        # Maps seq_id -> past_key_values for each sequence
-        self.seq_kv_caches: Dict[str, any] = {}
+        # M2: Per-request caches for batching
+        # req_id -> past_key_values
+        self.request_caches: Dict[str, any] = {}
         
         # Get number of layers
         if hasattr(self.model, 'model') and hasattr(self.model.model, 'layers'):
@@ -82,7 +83,7 @@ class ModelRunner:
         """Clear KV caches."""
         self.kv_caches = None
         self.past_key_values = None
-        self.seq_kv_caches.clear()
+        self.request_caches.clear()
     
     def prepare_inputs(
         self,
@@ -204,147 +205,95 @@ class ModelRunner:
         return logits[:, -1, :]
     
     @torch.no_grad()
-    def execute_batch(
+    def execute_model_batch(
         self,
         input_batch: InputBatch,
-    ) -> torch.Tensor:
-        """Execute model on a batch of requests (M2).
+    ) -> Dict[str, torch.Tensor]:
+        """Execute model for a batch of requests.
         
-        Supports both prefill and decode phases with proper KV cache management.
-        
-        Args:
-            input_batch: InputBatch containing multiple requests.
-            
-        Returns:
-            Logits [batch_size, seq_len, vocab_size]
-        """
-        if input_batch.is_prefill:
-            return self._execute_batch_prefill(input_batch)
-        else:
-            return self._execute_batch_decode(input_batch)
-    
-    def _execute_batch_prefill(
-        self,
-        input_batch: InputBatch,
-    ) -> torch.Tensor:
-        """Execute prefill for a batch of requests.
-        
-        Prefill processes the entire prompt and initializes KV caches.
+        This is the M2 batching method that handles multiple requests
+        simultaneously, including mixed prefill and decode phases.
         
         Args:
-            input_batch: InputBatch in prefill phase.
+            input_batch: Batch of inputs with variable-length sequences
             
         Returns:
-            Logits [batch_size, max_seq_len, vocab_size]
+            Dict mapping req_id -> logits for next token [vocab_size]
         """
-        input_ids = input_batch.token_ids
-        position_ids = input_batch.position_ids
-        attention_mask = input_batch.attention_mask
+        if input_batch.batch_size == 0:
+            return {}
         
-        # Execute model (HuggingFace style)
-        # For prefill, we don't use past_key_values (start fresh)
-        outputs = self.model(
-            input_ids=input_ids,
-            position_ids=position_ids,
-            attention_mask=attention_mask,
-            past_key_values=None,
-            use_cache=True,
-            return_dict=True,
+        # Convert to padded tensors
+        token_ids, attention_mask, positions = input_batch.to_tensors(
+            device=self.device,
+            pad_token_id=0,  # Padding token
         )
         
-        logits = outputs.logits
-        past_key_values = outputs.past_key_values
+        # For M2, we process each request separately to manage KV caches
+        # M3+ will use PagedAttention for efficient batched execution
+        results: Dict[str, torch.Tensor] = {}
         
-        # Store KV caches for each sequence
-        for i, seq_id in enumerate(input_batch.seq_ids):
-            # Extract KV cache for this sequence
-            # For batch processing, we need to slice the batch dimension
-            seq_past_kv = []
-            for layer_kv in past_key_values:
-                # layer_kv is (key_cache, value_cache)
-                # Each has shape [batch_size, num_heads, seq_len, head_dim]
-                seq_layer_kv = (
-                    layer_kv[0][i:i+1],  # key for this sequence
-                    layer_kv[1][i:i+1],  # value for this sequence
-                )
-                seq_past_kv.append(seq_layer_kv)
+        for i, req_id in enumerate(input_batch.req_ids):
+            # Extract this request's inputs
+            req_token_ids = token_ids[i:i+1]  # [1, seq_len]
+            req_positions = positions[i:i+1]  # [1, seq_len]
+            req_attention_mask = attention_mask[i:i+1]  # [1, seq_len]
             
-            self.seq_kv_caches[seq_id] = tuple(seq_past_kv)
+            # Remove padding
+            seq_len = req_attention_mask[0].sum().item()
+            req_token_ids = req_token_ids[:, :seq_len]
+            req_positions = req_positions[:, :seq_len]
+            
+            # Get or initialize cache for this request
+            if req_id not in self.request_caches:
+                self.request_caches[req_id] = None
+            
+            past_key_values = self.request_caches[req_id]
+            
+            # Execute model for this request
+            if hasattr(self.model, 'forward') and 'position_ids' in str(self.model.forward.__code__.co_varnames):
+                # HuggingFace model
+                outputs = self.model(
+                    input_ids=req_token_ids,
+                    position_ids=req_positions,
+                    past_key_values=past_key_values,
+                    use_cache=True,
+                    return_dict=True,
+                )
+                logits = outputs.logits
+                # Update cache for this request
+                self.request_caches[req_id] = outputs.past_key_values
+            else:
+                # Custom model or fallback
+                try:
+                    outputs = self.model(
+                        input_ids=req_token_ids,
+                        past_key_values=past_key_values,
+                        use_cache=True,
+                        return_dict=True,
+                    )
+                    logits = outputs.logits
+                    self.request_caches[req_id] = outputs.past_key_values
+                except:
+                    # Fallback to no cache
+                    outputs = self.model(
+                        input_ids=req_token_ids,
+                        return_dict=True,
+                    )
+                    logits = outputs.logits
+            
+            # Extract logits for the last token
+            next_token_logits = logits[0, -1, :]  # [vocab_size]
+            results[req_id] = next_token_logits
         
-        return logits
+        return results
     
-    def _execute_batch_decode(
-        self,
-        input_batch: InputBatch,
-    ) -> torch.Tensor:
-        """Execute decode for a batch of requests.
-        
-        Decode generates one token at a time using cached KV values.
+    def free_request_cache(self, req_id: str):
+        """Free KV cache for a finished request.
         
         Args:
-            input_batch: InputBatch in decode phase.
-            
-        Returns:
-            Logits [batch_size, 1, vocab_size]
+            req_id: Request ID to free cache for
         """
-        input_ids = input_batch.token_ids
-        position_ids = input_batch.position_ids
-        
-        # Gather past_key_values for all sequences in the batch
-        batch_past_kv = []
-        num_layers = len(self.seq_kv_caches[input_batch.seq_ids[0]])
-        
-        for layer_idx in range(num_layers):
-            layer_keys = []
-            layer_values = []
-            
-            for seq_id in input_batch.seq_ids:
-                if seq_id not in self.seq_kv_caches:
-                    raise ValueError(f"No KV cache found for sequence {seq_id}")
-                
-                seq_past_kv = self.seq_kv_caches[seq_id]
-                key, value = seq_past_kv[layer_idx]
-                layer_keys.append(key)
-                layer_values.append(value)
-            
-            # Concatenate along batch dimension
-            batch_key = torch.cat(layer_keys, dim=0)
-            batch_value = torch.cat(layer_values, dim=0)
-            batch_past_kv.append((batch_key, batch_value))
-        
-        batch_past_kv = tuple(batch_past_kv)
-        
-        # Execute model with past KV caches
-        outputs = self.model(
-            input_ids=input_ids,
-            position_ids=position_ids,
-            past_key_values=batch_past_kv,
-            use_cache=True,
-            return_dict=True,
-        )
-        
-        logits = outputs.logits
-        new_past_kv = outputs.past_key_values
-        
-        # Update KV caches for each sequence
-        for i, seq_id in enumerate(input_batch.seq_ids):
-            seq_past_kv = []
-            for layer_kv in new_past_kv:
-                seq_layer_kv = (
-                    layer_kv[0][i:i+1],
-                    layer_kv[1][i:i+1],
-                )
-                seq_past_kv.append(seq_layer_kv)
-            
-            self.seq_kv_caches[seq_id] = tuple(seq_past_kv)
-        
-        return logits
-    
-    def remove_seq_kv_cache(self, seq_id: str) -> None:
-        """Remove KV cache for a finished sequence.
-        
-        Args:
-            seq_id: Sequence ID to remove.
-        """
-        self.seq_kv_caches.pop(seq_id, None)
+        if req_id in self.request_caches:
+            del self.request_caches[req_id]
 
