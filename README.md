@@ -56,49 +56,60 @@ pip install -e .
 # M0 基础功能演示
 python examples/m0_basic_usage.py
 
+# M1 推理示例
+python examples/m1_inference.py \
+    --model Qwen/Qwen3-0.6B \
+    --prompt "What is the capital of France?" \
+    --max-tokens 50
+
 # 运行测试
 pytest tests/unit/test_m0_*.py -v
+pytest tests/unit/test_m1_*.py -v
+pytest tests/integration/test_m1_e2e.py -v
 ```
 
 ### 3. 基础使用
 
 ```python
-from folovllm import (
-    ModelConfig,
-    SamplingParams,
-    Request,
-    get_model_and_tokenizer
-)
+from folovllm import LLMEngine, ModelConfig, SamplingParams
 
 # 创建配置
 config = ModelConfig(
-    model="Qwen/Qwen2.5-0.6B",
+    model="Qwen/Qwen3-0.6B",
     dtype="float16",
     trust_remote_code=True
 )
 
-# 加载模型（M0 完成）
-model, tokenizer = get_model_and_tokenizer(config, device="cuda")
+# 初始化引擎（M1 完成）
+engine = LLMEngine(config, device="cuda")
 
-# M1+ 将实现完整的推理引擎
-# llm = LLM(model="Qwen/Qwen2.5-0.6B")
-# outputs = llm.generate("你好，请介绍一下自己")
+# 生成文本
+sampling_params = SamplingParams(
+    temperature=0.7,
+    top_k=50,
+    top_p=0.95,
+    max_tokens=100
+)
+output = engine.generate("你好，请介绍一下自己", sampling_params)
+
+print(output.outputs[0].text)
+print(f"Throughput: {output.metrics['throughput']:.2f} tokens/s")
 ```
 
 ## 📚 开发路线
 
 本项目采用**渐进式开发**，每个阶段都是上一阶段的超集：
 
-| 阶段   | 功能            | 状态     | 文档                                             |
-| ------ | --------------- | -------- | ------------------------------------------------ |
-| **M0** | 项目初始化      | ✅ 已完成 | [开发日志](docs/dev/milestone_0.md)              |
-| **M1** | 基础离线推理    | ⏳ 待开始 | [学习笔记](docs/learn/01_basic_inference.md)     |
-| **M2** | 连续批处理      | ⏳ 待开始 | [学习笔记](docs/learn/02_continuous_batching.md) |
-| **M3** | Paged KV Cache  | ⏳ 待开始 | [学习笔记](docs/learn/03_paged_kv_cache.md)      |
-| **M4** | Flash Attention | ⏳ 待开始 | [学习笔记](docs/learn/04_flash_attention.md)     |
-| **M5** | Chunked Prefill | ⏳ 待开始 | [学习笔记](docs/learn/05_chunked_prefill.md)     |
-| **M6** | 前缀复用        | ⏳ 待开始 | [学习笔记](docs/learn/06_prefix_caching.md)      |
-| **M7** | GPTQ 量化       | ⏳ 待开始 | [学习笔记](docs/learn/07_gptq_quantization.md)   |
+| 阶段   | 功能            | 状态     | 文档                                                                                                                                                                   |
+| ------ | --------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **M0** | 项目初始化      | ✅ 已完成 | [开发日志](docs/dev/milestone_0.md)                                                                                                                                    |
+| **M1** | 基础离线推理    | ✅ 已完成 | [📖 总览](docs/milestone_1_index.md) · [学习笔记](docs/learn/milestone_1.md) · [口述展示](docs/presentation/milestone_1.md) · [面试指南](docs/interview/milestone_1.md) |
+| **M2** | 连续批处理      | ⏳ 待开始 | [学习笔记](docs/learn/02_continuous_batching.md)                                                                                                                       |
+| **M3** | Paged KV Cache  | ⏳ 待开始 | [学习笔记](docs/learn/03_paged_kv_cache.md)                                                                                                                            |
+| **M4** | Flash Attention | ⏳ 待开始 | [学习笔记](docs/learn/04_flash_attention.md)                                                                                                                           |
+| **M5** | Chunked Prefill | ⏳ 待开始 | [学习笔记](docs/learn/05_chunked_prefill.md)                                                                                                                           |
+| **M6** | 前缀复用        | ⏳ 待开始 | [学习笔记](docs/learn/06_prefix_caching.md)                                                                                                                            |
+| **M7** | GPTQ 量化       | ⏳ 待开始 | [学习笔记](docs/learn/07_gptq_quantization.md)                                                                                                                         |
 
 📖 **完整开发计划**: [development_plan.md](docs/development_plan.md)
 

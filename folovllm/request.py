@@ -160,7 +160,10 @@ class Request:
     # Status
     status: RequestStatus = RequestStatus.WAITING
     
-    # M2: Add scheduling metadata
+    # M2: Scheduling metadata
+    scheduled_time: Optional[float] = None  # When the request was first scheduled
+    num_computed_tokens: int = 0  # Number of tokens computed so far
+    
     # M3: Add KV cache blocks
     
     def __post_init__(self):

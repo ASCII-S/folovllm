@@ -145,7 +145,7 @@ Milestone 0 完成了 FoloVLLM 项目的基础架构搭建，包括核心配置�
 - `get_model_and_tokenizer()`: 快速加载接口
 
 #### 支持的模型
-- Qwen/Qwen2.5-0.6B ✅（主要测试模型）
+- Qwen/Qwen3-0.6B ✅（主要测试模型）
 - 所有 HuggingFace AutoModelForCausalLM 支持的模型
 
 ### 6. 工具函数 (`folovllm/utils/common.py`)
@@ -352,7 +352,7 @@ from folovllm import ModelConfig, CacheConfig, EngineConfig
 
 # 创建模型配置
 model_config = ModelConfig(
-    model="Qwen/Qwen2.5-0.6B",
+    model="Qwen/Qwen3-0.6B",
     dtype="float16",
     trust_remote_code=True,
 )
@@ -376,7 +376,7 @@ engine_config = EngineConfig(
 from folovllm import get_model_and_tokenizer, ModelConfig
 
 config = ModelConfig(
-    model="Qwen/Qwen2.5-0.6B",
+    model="Qwen/Qwen3-0.6B",
     dtype="float16",
     trust_remote_code=True,
 )
@@ -584,7 +584,7 @@ tests/unit/test_m0_utils.py::TestUtils::test_move_to_device PASSED
 
 ### HuggingFace
 - Transformers 文档: https://huggingface.co/docs/transformers
-- Qwen2.5 模型: https://huggingface.co/Qwen/Qwen2.5-0.6B
+- Qwen2.5 模型: https://huggingface.co/Qwen/Qwen3-0.6B
 
 ### 测试框架
 - pytest 文档: https://docs.pytest.org/

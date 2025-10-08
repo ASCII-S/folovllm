@@ -1472,7 +1472,7 @@ class TestModelLoadingGPU:
     def test_load_model_and_tokenizer(self):
         """测试加载模型和 tokenizer"""
         config = ModelConfig(
-            model="Qwen/Qwen2.5-0.6B",
+            model="Qwen/Qwen3-0.6B",
             dtype="float16",
         )
         

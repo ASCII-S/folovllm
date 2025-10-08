@@ -64,12 +64,12 @@ python -c "import torch; print(torch.cuda.is_available())"
 
 ```bash
 # 使用 HuggingFace CLI
-huggingface-cli download Qwen/Qwen2.5-0.6B --local-dir models/Qwen2.5-0.6B
+huggingface-cli download Qwen/Qwen3-0.6B --local-dir models/Qwen2.5-0.6B
 
 # 或在 Python 中自动下载
 python -c "
 from transformers import AutoModelForCausalLM
-model = AutoModelForCausalLM.from_pretrained('Qwen/Qwen2.5-0.6B')
+model = AutoModelForCausalLM.from_pretrained('Qwen/Qwen3-0.6B')
 "
 ```
 
@@ -84,7 +84,7 @@ from folovllm import LLM
 from folovllm.sampling_params import SamplingParams
 
 # 初始化模型
-llm = LLM(model="Qwen/Qwen2.5-0.6B")
+llm = LLM(model="Qwen/Qwen3-0.6B")
 
 # 设置采样参数
 sampling_params = SamplingParams(
@@ -144,7 +144,7 @@ config = EngineConfig(
 )
 
 llm = LLM(
-    model="Qwen/Qwen2.5-0.6B-GPTQ",
+    model="Qwen/Qwen3-0.6B-GPTQ",
     engine_config=config
 )
 
@@ -160,7 +160,7 @@ outputs = llm.generate(prompts, sampling_params)
 
 ```bash
 python -m folovllm.run \
-    --model Qwen/Qwen2.5-0.6B \
+    --model Qwen/Qwen3-0.6B \
     --prompt "你好，请介绍一下自己" \
     --temperature 0.7 \
     --max-tokens 100
@@ -177,7 +177,7 @@ cat << EOF > prompts.txt
 EOF
 
 python -m folovllm.run \
-    --model Qwen/Qwen2.5-0.6B \
+    --model Qwen/Qwen3-0.6B \
     --input-file prompts.txt \
     --output-file results.txt
 ```
@@ -186,7 +186,7 @@ python -m folovllm.run \
 
 ```bash
 python -m folovllm.run \
-    --model Qwen/Qwen2.5-0.6B \
+    --model Qwen/Qwen3-0.6B \
     --prompt "你好" \
     --enable-paged-kv \
     --enable-flash-attn \
@@ -202,20 +202,20 @@ python -m folovllm.run \
 ```bash
 # 单请求延迟测试
 python tests/benchmark/latency_test.py \
-    --model Qwen/Qwen2.5-0.6B \
+    --model Qwen/Qwen3-0.6B \
     --prompt-len 100 \
     --output-len 50
 
 # 吞吐量测试
 python tests/benchmark/throughput_test.py \
-    --model Qwen/Qwen2.5-0.6B \
+    --model Qwen/Qwen3-0.6B \
     --num-requests 100 \
     --concurrent 16
 
 # 不同 milestone 对比
 python tests/benchmark/compare_milestones.py \
     --milestones m1,m2,m3,m4 \
-    --model Qwen/Qwen2.5-0.6B
+    --model Qwen/Qwen3-0.6B
 ```
 
 ### 显存分析
@@ -223,7 +223,7 @@ python tests/benchmark/compare_milestones.py \
 ```bash
 # 显存占用分析
 python tests/benchmark/memory_test.py \
-    --model Qwen/Qwen2.5-0.6B \
+    --model Qwen/Qwen3-0.6B \
     --batch-sizes 1,4,8,16,32
 ```
 
@@ -237,7 +237,7 @@ python tests/benchmark/memory_test.py \
 from folovllm import LLM
 from folovllm.sampling_params import SamplingParams
 
-llm = LLM(model="Qwen/Qwen2.5-0.6B")
+llm = LLM(model="Qwen/Qwen3-0.6B")
 
 system_prompt = "你是一个有帮助的AI助手。"
 conversation = []
@@ -271,7 +271,7 @@ from folovllm.config import EngineConfig
 
 # 启用前缀缓存
 config = EngineConfig(enable_prefix_caching=True)
-llm = LLM(model="Qwen/Qwen2.5-0.6B", engine_config=config)
+llm = LLM(model="Qwen/Qwen3-0.6B", engine_config=config)
 
 # Few-shot examples (共享前缀)
 examples = """
@@ -304,7 +304,7 @@ for query in queries:
 ```python
 from folovllm import LLM
 
-llm = LLM(model="Qwen/Qwen2.5-0.6B")
+llm = LLM(model="Qwen/Qwen3-0.6B")
 
 task_prompt = "请判断以下文本的情感（正面/负面）："
 
@@ -370,7 +370,7 @@ import logging
 logging.basicConfig(level=logging.DEBUG)
 
 from folovllm import LLM
-llm = LLM(model="Qwen/Qwen2.5-0.6B", log_level="DEBUG")
+llm = LLM(model="Qwen/Qwen3-0.6B", log_level="DEBUG")
 ```
 
 ### 性能分析

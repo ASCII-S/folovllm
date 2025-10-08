@@ -98,7 +98,7 @@ def test_scheduler_with_requests():
 # tests/integration/test_e2e.py
 def test_basic_inference():
     from folovllm import LLM
-    llm = LLM(model="Qwen/Qwen2.5-0.6B")
+    llm = LLM(model="Qwen/Qwen3-0.6B")
     output = llm.generate("Hello")
     assert len(output) > 0
 ```

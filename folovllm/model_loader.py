@@ -26,11 +26,13 @@ class ModelLoader:
     def load_model(self, device: str = "cuda") -> PreTrainedModel:
         """Load the model from HuggingFace.
         
+        For M1, we use HuggingFace models directly for compatibility.
+        
         Args:
             device: Device to load the model on ('cuda' or 'cpu').
             
         Returns:
-            Loaded model.
+            Loaded model (wrapped with compute_logits method).
         """
         model_path = self.model_config.model
         
@@ -57,7 +59,7 @@ class ModelLoader:
         print(f"  - max_model_len: {self.model_config.max_model_len}")
         print(f"  - device: {device}")
         
-        # Load model
+        # Load model using HuggingFace AutoModel
         model = AutoModelForCausalLM.from_pretrained(
             model_path,
             config=hf_config,
@@ -67,12 +69,36 @@ class ModelLoader:
         )
         
         # Move to device
-        model = model.to(device)
+        model = model.to(device=device)
         model.eval()
+        
+        # Wrap model to add compute_logits method if it doesn't exist
+        model = self._wrap_model_for_folovllm(model)
         
         print(f"Model loaded successfully!")
         print(f"  - Model type: {type(model).__name__}")
         print(f"  - Number of parameters: {self._count_parameters(model):,}")
+        
+        return model
+    
+    def _wrap_model_for_folovllm(self, model: PreTrainedModel) -> PreTrainedModel:
+        """Wrap HuggingFace model to add FoloVLLM-specific methods.
+        
+        Args:
+            model: HuggingFace model
+            
+        Returns:
+            Wrapped model with compute_logits method
+        """
+        # Add compute_logits method if it doesn't exist
+        if not hasattr(model, 'compute_logits'):
+            def compute_logits(hidden_states):
+                """Compute logits from hidden states."""
+                return model.lm_head(hidden_states)
+            
+            # Bind the method to the model
+            import types
+            model.compute_logits = types.MethodType(compute_logits, model)
         
         return model
     

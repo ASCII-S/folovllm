@@ -498,7 +498,7 @@ Sequence.status = FINISHED_*
 
 ```python
 # 分步构建配置
-model_config = ModelConfig(model="Qwen/Qwen2.5-0.6B")
+model_config = ModelConfig(model="Qwen/Qwen3-0.6B")
 cache_config = CacheConfig(block_size=16)
 scheduler_config = SchedulerConfig(max_num_seqs=256)
 
