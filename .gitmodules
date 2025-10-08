@@ -4,3 +4,6 @@
 [submodule "reference/nano-vllm"]
 	path = reference/nano-vllm
 	url = https://github.com/GeeeekExplorer/nano-vllm.git
+[submodule "reference/Qwen3-0.6B"]
+	path = reference/Qwen3-0.6B
+	url = https://huggingface.co/Qwen/Qwen3-0.6B
